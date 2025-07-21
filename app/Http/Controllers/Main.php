@@ -3,9 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Events\OrderCreated;
-use App\Http\Controllers\admin\Category;
 use App\Http\Controllers\Controller;
 use App\Models\Categories;
+use App\Models\Config;
+use App\Models\ConfigPromptpay;
 use App\Models\LogStock;
 use App\Models\Menu;
 use App\Models\MenuOption;
@@ -18,6 +19,7 @@ use App\Models\Promotion;
 use App\Models\Stock;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Session;
+use PromptPayQR\Builder as PromptPayQRBuilder;
 
 class Main extends Controller
 {
@@ -28,47 +30,52 @@ class Main extends Controller
             session(['table_id' => $table_id]);
         }
         $promotion = Promotion::where('is_status', 1)->get();
-        $category = Categories::has('menu')->with('files')->get();
+        $category  = Categories::has('menu')->with('files')->get();
         return view('users.main_page', compact('category', 'promotion'));
     }
 
     public function detail($id)
     {
         $item = [];
-        $menu = Menu::where('categories_id', $id)->with('files')->orderBy('created_at', 'asc')->get();
+        $menu = Menu::where('categories_id', $id)
+                    ->with('files')
+                    ->orderBy('created_at', 'asc')
+                    ->get();
+
         foreach ($menu as $key => $rs) {
             $item[$key] = [
-                'id' => $rs->id,
-                'category_id' => $rs->categories_id,
-                'name' => $rs->name,
-                'detail' => $rs->detail,
+                'id'         => $rs->id,
+                'category_id'=> $rs->categories_id,
+                'name'       => $rs->name,
+                'detail'     => $rs->detail,
                 'base_price' => $rs->base_price,
-                'files' => $rs['files']
+                'files'      => $rs->files,
             ];
+
             $typeOption = MenuTypeOption::where('menu_id', $rs->id)->get();
-            if (count($typeOption) > 0) {
-                foreach ($typeOption as $typeOptions) {
+            if ($typeOption->count()) {
+                foreach ($typeOption as $to) {
                     $optionItem = [];
-                    $option = MenuOption::where('menu_type_option_id', $typeOptions->id)->get();
-                    foreach ($option as $options) {
+                    $opt = MenuOption::where('menu_type_option_id', $to->id)->get();
+                    foreach ($opt as $o) {
                         $optionItem[] = (object)[
-                            'id' => $options->id,
-                            'name' => $options->type,
-                            'price' => $options->price
+                            'id'    => $o->id,
+                            'name'  => $o->type,
+                            'price' => $o->price,
                         ];
                     }
-                    $item[$key]['option'][$typeOptions->name] = [
-                        'is_selected' => $typeOptions->is_selected,
-                        'amout' => $typeOptions->amout,
-                        'items' =>  $optionItem
+                    $item[$key]['option'][$to->name] = [
+                        'is_selected' => $to->is_selected,
+                        'amount'      => $to->amout,
+                        'items'       => $optionItem,
                     ];
                 }
             } else {
                 $item[$key]['option'] = [];
             }
         }
-        $menu = $item;
-        return view('users.detail_page', compact('menu'));
+
+        return view('users.detail_page', ['menu' => $item]);
     }
 
     public function order()
@@ -78,80 +85,170 @@ class Main extends Controller
 
     public function SendOrder(Request $request)
     {
-        $data = [
-            'status' => false,
-            'message' => 'สั่งออเดอร์ไม่สำเร็จ',
-        ];
+        $data = ['status'=>false,'message'=>'สั่งออเดอร์ไม่สำเร็จ'];
         $orderData = $request->input('cart');
-        $remark = $request->input('remark');
-        $item = array();
-        $total = 0;
-        foreach ($orderData as $key => $order) {
-            $item[$key] = [
-                'menu_id' => $order['id'],
-                'quantity' => $order['amount'],
-                'price' => $order['total_price']
+        $remark    = $request->input('remark');
+        $items = []; $total = 0;
+
+        foreach ($orderData as $order) {
+            $options = !empty($order['options'])
+                     ? array_column($order['options'], 'id')
+                     : [];
+            $items[] = [
+                'menu_id'=> $order['id'],
+                'quantity'=> $order['amount'],
+                'price'   => $order['total_price'],
+                'options' => $options,
             ];
-            if (!empty($order['options'])) {
-                foreach ($order['options'] as $rs) {
-                    $item[$key]['option'][] = $rs['id'];
-                }
-            } else {
-                $item[$key]['option'] = [];
-            }
-            $total = $total + $order['total_price'];
+            $total += $order['total_price'];
         }
-        if (!empty($item)) {
+
+        if ($items) {
             $order = new Orders();
-            $order->table_id = session('table_id') ?? '1';
-            $order->total = $total;
-            $order->remark = $remark;
-            $order->status = 1;
+            $order->table_id = session('table_id') ?: 1;
+            $order->total    = $total;
+            $order->remark   = $remark;
+            $order->status   = 1;
             if ($order->save()) {
-                foreach ($item as $rs) {
-                    $orderdetail = new OrdersDetails();
-                    $orderdetail->order_id = $order->id;
-                    $orderdetail->menu_id = $rs['menu_id'];
-                    $orderdetail->quantity = $rs['quantity'];
-                    $orderdetail->price = $rs['price'];
-                    if ($orderdetail->save()) {
-                        foreach ($rs['option'] as $key => $option) {
-                            $orderOption = new OrdersOption();
-                            $orderOption->order_detail_id = $orderdetail->id;
-                            $orderOption->option_id = $option;
-                            $orderOption->save();
-                            $menuStock = MenuStock::where('menu_option_id', $option)->get();
-                            if ($menuStock->isNotEmpty()) {
-                                foreach ($menuStock as $stock_rs) {
-                                    $stock = Stock::find($stock_rs->stock_id);
-                                    $stock->amount = $stock->amount - ($stock_rs->amount * $rs['qty']);
-                                    if ($stock->save()) {
-                                        $log_stock = new LogStock();
-                                        $log_stock->stock_id = $stock_rs->stock_id;
-                                        $log_stock->order_id = $order->id;
-                                        $log_stock->menu_option_id = $rs['option'];
-                                        $log_stock->old_amount = $stock_rs->amount;
-                                        $log_stock->amount = ($stock_rs->amount * $rs['qty']);
-                                        $log_stock->status = 2;
-                                        $log_stock->save();
-                                    }
+                foreach ($items as $rs) {
+                    $detail = new OrdersDetails();
+                    $detail->order_id = $order->id;
+                    $detail->menu_id  = $rs['menu_id'];
+                    $detail->quantity = $rs['quantity'];
+                    $detail->price    = $rs['price'];
+                    if ($detail->save()) {
+                        foreach ($rs['options'] as $opt) {
+                            // บันทึก OrdersOption
+                            $orderOpt = new OrdersOption();
+                            $orderOpt->order_detail_id = $detail->id;
+                            $orderOpt->option_id       = $opt;
+                            $orderOpt->save();
+
+                            // ปรับสต็อก
+                            MenuStock::where('menu_option_id', $opt)->get()->each(function($ms) use($order, $rs){
+                                $stk = Stock::find($ms->stock_id);
+                                $old = $stk->amount;
+                                $stk->amount -= ($ms->amount * $rs['quantity']);
+                                if ($stk->save()) {
+                                    $log = new LogStock();
+                                    $log->stock_id         = $ms->stock_id;
+                                    $log->order_id         = $order->id;
+                                    $log->menu_option_id   = $ms->menu_option_id;
+                                    $log->old_amount       = $old;
+                                    $log->amount           = $ms->amount * $rs['quantity'];
+                                    $log->status           = 2;
+                                    $log->save();
                                 }
-                            }
+                            });
                         }
                     }
                 }
+                event(new OrderCreated(['📦 มีออเดอร์ใหม่']));
+                $data = ['status'=>true,'message'=>'สั่งออเดอร์เรียบร้อยแล้ว'];
             }
-            event(new OrderCreated(['📦 มีออเดอร์ใหม่']));
-            $data = [
-                'status' => true,
-                'message' => 'สั่งออเดอร์เรียบร้อยแล้ว',
-            ];
         }
+
         return response()->json($data);
     }
 
     public function sendEmp()
     {
-        event(new OrderCreated(['ลูกค้าเรียกจากโต้ะที่ ' . session('table_id')]));
+        event(new OrderCreated(['ลูกค้าเรียกจากโต้ะที่ '.session('table_id')]));
+    }
+
+    public function listorder()
+{
+    $orderlist = Orders::where('table_id', session('table_id'))
+                       ->whereIn('status', [1,2])
+                       ->get();
+
+    $config = Config::first();
+    $cp = ConfigPromptpay::where('config_id', $config->id)->first();
+
+    // ตั้งค่า QR code
+    $qr = '';
+    if ($cp && $cp->promptpay) {
+        // ถ้ามี PromptPay ให้สร้าง SVG QR
+        $svg = PromptPayQRBuilder::staticMerchantPresentedQR($cp->promptpay)
+                                 ->toSvgString();
+        $qr = "<div class='row g-3 mb-3'>
+                 <div class='col-md-12'>{$svg}</div>
+               </div>";
+    } elseif ($config->image_qr) {
+        // ถ้าไม่มี PromptPay แต่มีรูป QR จาก config
+        $url = url('storage/'.$config->image_qr);
+        $qr = "<div class='row g-3 mb-3'>
+                 <div class='col-md-12'>
+                   <img width='100%' src='{$url}'>
+                 </div>
+               </div>";
+    }
+
+    return view('users.order', compact('orderlist', 'qr'));
+}
+
+    public function listorderDetails(Request $request)
+    {
+        $info = '';
+        $groups = OrdersDetails::select('menu_id')
+                    ->where('order_id', $request->id)
+                    ->groupBy('menu_id')
+                    ->get();
+
+        foreach ($groups as $g) {
+            $details = OrdersDetails::with('menu','option')
+                        ->where('order_id', $request->id)
+                        ->where('menu_id', $g->menu_id)
+                        ->get();
+
+            $name = optional($details->first()->menu)->name ?: 'ไม่พบชื่อเมนู';
+            $info .= "<div class='mb-3'>";
+            foreach ($details as $d) {
+                $text  = $d->option ? '+ '.htmlspecialchars($d->option->type) : '';
+                $price = number_format($d->quantity * $d->price, 2);
+                $info .= "
+                    <ul class='list-group mb-1 shadow-sm rounded'>
+                      <li class='list-group-item d-flex justify-content-between'>
+                        <div>
+                          <span class='fw-bold'>".htmlspecialchars($name)."</span>
+                          <div class='small text-secondary'>{$text}</div>
+                        </div>
+                        <div class='text-end'>
+                          <div>จำนวน: {$d->quantity}</div>
+                          <button class='btn btn-sm btn-primary'>{$price} บาท</button>
+                        </div>
+                      </li>
+                    </ul>";
+            }
+            $info .= '</div>';
+        }
+
+        echo $info;
+    }
+
+    public function confirmPay(Request $request)
+    {
+        $data = ['status'=>false,'message'=>'สั่งออเดอร์ไม่สำเร็จ'];
+        $request->validate([
+            'silp' => 'required|image|mimes:jpeg,png|max:2048',
+        ]);
+
+        $orders = Orders::where('table_id', session('table_id'))
+                        ->whereIn('status',[1,2])
+                        ->get();
+
+        foreach ($orders as $o) {
+            $o->status = 4;
+            if ($file = $request->file('silp')) {
+                $filename = time().'_'.$file->getClientOriginalName();
+                $o->image = $file->storeAs('image', $filename, 'public');
+            }
+            $o->save();
+        }
+
+        event(new OrderCreated(['📦 มีออเดอร์ใหม่']));
+        $data = ['status'=>true,'message'=>'ชำระเงินเรียบร้อยแล้ว'];
+
+        return response()->json($data);
     }
 }

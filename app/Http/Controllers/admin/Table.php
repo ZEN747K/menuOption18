@@ -27,12 +27,12 @@ class Table extends Controller
         if (count($table) > 0) {
             $info = [];
             foreach ($table as $rs) {
-                $qr_code = '<button data-id="' . $rs->id . '" type="button" class="btn btn-sm btn-outline-primary modalQr"><i class="bx bx-search-alt-2"></i></button>';
+                $qr = '<button data-id="' . $rs->id . '" type="button" class="btn btn-sm btn-outline-primary modalQr"><i class="bx bx-search-alt-2"></i></button>';
                 $action = '<a href="' . route('tableEdit', $rs->id) . '" class="btn btn-sm btn-outline-primary" title="แก้ไข"><i class="bx bx-edit-alt"></i></a>
                 <button type="button" data-id="' . $rs->id . '" class="btn btn-sm btn-outline-danger deleteTable" title="ลบ"><i class="bx bxs-trash"></i></button>';
                 $info[] = [
                     'number' => $rs->table_number,
-                    'qr_code' => $qr_code,
+                    'qr_code' => $qr,
                     'action' => $action
                 ];
             }
